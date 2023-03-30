@@ -17,7 +17,13 @@ Parameters:
     Description: Account number allowed to read the artifacts
 
 Resources:
-  # TODO CodeBuildSourceCredential
+  # Global Definition of credential needed by CodeBuild to access to GitHub
+  CodeBuildSourceCredential:
+    Type: AWS::CodeBuild::SourceCredential
+    Properties:
+      Token: '{{resolve:secretsmanager:github:SecretString:token}}'
+      ServerType: GITHUB
+      AuthType: PERSONAL_ACCESS_TOKEN
 
   # Pipeline artifacts bucket
   CodePipelineBucket:
