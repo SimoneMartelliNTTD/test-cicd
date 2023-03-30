@@ -1,0 +1,224 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: CodeBuild for webapp project (node)
+
+Parameters:
+  GitHubProjectName:
+    Description: Name of pagopa project name
+    Type: String
+    Default: test-cicd
+  BaseDir:
+    Description: base directory of the front end project pattern = [A-Za-z0-9][A-Za-z0-9\-_]{123,240}
+    Type: String
+  PackageName:
+    Description: build project name pattern = [A-Za-z0-9][A-Za-z0-9\-_]{123,240}
+    Type: String
+  CiArtifactBucket:
+    Description: Ci Artifact bucket name
+    Type: String
+  CodeArtifactDomainName:
+    Description: Used for maven repository access
+    Type: String
+    Default: test-develop-bootstrap-step-01-domain
+  CodeArtifactRepositoryName:
+    Description: Used for maven repository access
+    Type: String
+    Default: test-develop-bootstrap-step-01-repo
+
+Resources:
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${GitHubProjectName}-${PackageName}-CodeBuild"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      BuildBatchConfig:
+        ServiceRole: !GetAtt BuildBatchServiceRole.Arn
+        TimeoutInMins: 15
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/standard:6.0
+        EnvironmentVariables:
+          - Name: CODEARTIFACT_DOMAIN_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${CodeArtifactDomainName}"
+          - Name: CODEARTIFACT_DOMAIN_FULL
+            Type: PLAINTEXT
+            Value:
+              Fn::Join:
+                - ""
+                - - !Sub "${CodeArtifactDomainName}"
+                  - !Sub "-${AWS::AccountId}.d.codeartifact.${AWS::Region}.${AWS::URLSuffix}"
+          - Name: CODEARTIFACT_REPO
+            Type: PLAINTEXT
+            Value: !Sub "${CodeArtifactRepositoryName}"
+          - Name: GITHUB_PRJ_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${GitHubProjectName}"
+          - Name: SUB_PRJ_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${BaseDir}"
+          - Name: GIT_DEFAULT_BRANCH
+            Type: PLAINTEXT
+            Value: main
+          - Name: CI_ARTIFACT_BUCKET
+            Type: PLAINTEXT
+            Value: !Sub "${CiArtifactBucket}"
+          - Name: PACKAGE_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${PackageName}"
+      Source:
+        Type: GITHUB
+        Location: !Sub "https://github.com/SimoneMartelliNTTD/${GitHubProjectName}"
+        BuildSpec: !Sub "${BaseDir}/buildspec.yaml"
+      TimeoutInMinutes: 10
+      Cache:
+        Type: LOCAL
+        Modes: # You can specify one or more cache mode,
+          - LOCAL_CUSTOM_CACHE
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      Triggers:
+        Webhook: true
+        BuildType: BUILD_BATCH
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH
+            - Type: HEAD_REF
+              Pattern: ^refs/heads/(main|develop|hotfix)|release\/.*$
+          - - Type: EVENT
+              Pattern: PULL_REQUEST_MERGED
+            - Type: BASE_REF
+              Pattern: ^refs/heads/(main|develop|hotfix)|release\/.*$
+            - Type: FILE_PATH
+              Pattern: !Sub "^${BaseDir}/.*"
+
+  BuildBatchServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ""
+                Effect: Allow
+                Resource:
+                  - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${GitHubProjectName}-${PackageName}-CodeBuild"
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:StopBuild
+                  - codebuild:RetryBuild
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ""
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: CodeBuildReportGroup
+                Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*"
+              - Sid: CloudWatchLogsPolicy
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+              - Sid: BearerTokenPolicy
+                Effect: Allow
+                Action:
+                  - sts:GetServiceBearerToken
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    "sts:AWSServiceName": codeartifact.amazonaws.com
+              - Sid: GitHubSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+              - Sid: CodeArtifactGetAuthorizationTokenPolicy
+                Effect: Allow
+                Action:
+                  - codeartifact:GetAuthorizationToken
+                Resource: !Sub "arn:aws:codeartifact:${AWS::Region}:${AWS::AccountId}:domain/${CodeArtifactDomainName}"
+              - Sid: CodeArtifactRepository
+                Effect: Allow
+                Action:
+                  - codeartifact:ReadFromRepository
+                  - codeartifact:GetRepositoryEndpoint
+                  - codeartifact:ListPackages
+                Resource:
+                  - !Sub "arn:aws:codeartifact:${AWS::Region}:${AWS::AccountId}:repository/${CodeArtifactDomainName}/${CodeArtifactRepositoryName}"
+              - Sid: CodeArtifactPackage
+                Effect: Allow
+                Action:
+                  - codeartifact:PublishPackageVersion
+                  - codeartifact:PutPackageMetadata
+                  - codeartifact:ReadFromRepository
+                  - codeartifact:DescribePackageVersion
+                  - "codeartifact:List*"
+                  - "codeartifact:Get*"
+                  - "codeartifact:Read*"
+                Resource:
+                  - !Sub "arn:aws:codeartifact:${AWS::Region}:${AWS::AccountId}:package/${CodeArtifactDomainName}/${CodeArtifactRepositoryName}/*"
+                  - !Sub "arn:aws:codeartifact:${AWS::Region}:${AWS::AccountId}:domain/${CodeArtifactDomainName}"
+                  - !Sub "arn:aws:codeartifact:${AWS::Region}:${AWS::AccountId}:repository/${CodeArtifactDomainName}/${CodeArtifactRepositoryName}"
+              - Sid: CiArtifactBucket
+                Effect: Allow
+                Action:
+                  - s3:GetReplicationConfiguration
+                  - s3:ListBucket
+                Resource:
+                  - !Sub "arn:aws:s3:::${CiArtifactBucket}"
+              - Sid: CiArtifactBucketObjects
+                Effect: Allow
+                Action:
+                  - s3:GetObjectVersion
+                  - s3:GetObjectVersionAcl
+                  - "s3:PutObject*"
+                Resource:
+                  - !Sub "arn:aws:s3:::${CiArtifactBucket}/*"
+              - Sid: SendBuildEvents
+                Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - !Sub "arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/TestCiEventBus"
+              - Sid: CodeBuildControlPolicy
+                Effect: Allow
+                Action:
+                  - codebuild:StopBuild
+                Resource:
+                  - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${GitHubProjectName}-${PackageName}-CodeBuild"

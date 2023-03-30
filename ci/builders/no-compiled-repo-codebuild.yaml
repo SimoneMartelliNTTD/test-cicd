@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Trigger a custom codebuild event when a project branch is changed
+
+Parameters:
+  GitHubProjectName:
+    Description: Name of pagopa project name
+    Type: String
+    Default: test-cicd
+  GitHubDefaultBranch:
+    Description: Name of the dafult github branch
+    Type: String
+    Default: develop
+
+Resources:
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub "${GitHubProjectName}-CodeBuild"
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        PrivilegedMode: true
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:6.0
+        EnvironmentVariables:
+          - Name: GITHUB_PRJ_NAME
+            Type: PLAINTEXT
+            Value: !Sub "${GitHubProjectName}"
+          - Name: GIT_DEFAULT_BRANCH
+            Type: PLAINTEXT
+            Value: !Sub "${GitHubDefaultBranch}"
+          - Name: AWS_DEFAULT_REGION
+            Type: PLAINTEXT
+            Value: !Sub "${AWS::Region}"
+          - Name: AWS_ACCOUNT_ID
+            Type: PLAINTEXT
+            Value: !Sub "${AWS::AccountId}"
+          
+      Source:
+        Type: GITHUB
+        Location: !Sub 'https://github.com/SimoneMartelliNTTD/${GitHubProjectName}'
+        BuildSpec: |
+          version: 0.2
+          env:
+            shell: bash
+          phases:
+            install:
+              runtime-versions:
+                 java: corretto17
+            pre_build:
+              on-failure: ABORT
+              commands:
+                - BRANCH_NAME=$(echo $CODEBUILD_WEBHOOK_HEAD_REF | sed 's/refs\/heads\///'); export BRANCH_NAME=${BRANCH_NAME:=$GIT_DEFAULT_BRANCH}
+                - export BRANCH_TARGET=$(echo $CODEBUILD_WEBHOOK_BASE_REF | sed 's/refs\/heads\///')
+                - export PR_NUM=$(echo $CODEBUILD_SOURCE_VERSION | sed 's/pr\///')
+                - export COMMIT_ID=$(git rev-parse --verify HEAD)
+                - env
+            build:
+              on-failure: ABORT
+              commands:
+                - echo "Do nothing"
+            post_build:
+              on-failure: ABORT
+              commands:
+                - |
+                  if [[ "$BRANCH_NAME" =~ ^(main|develop)|release\/.*$ ]]; then
+                    echo Generate build event
+                    EVENT_DETAIL="{ \"event_type\": \"BUILD_DONE\", \"project_branch\":\"${BRANCH_NAME}\",\"project_type\":\"TEMPLATES\", \"project\":\"${GITHUB_PRJ_NAME}\", \"commit_id\": \"${COMMIT_ID}\" }"
+                    echo $EVENT_DETAIL | jq -R -s '[{ "DetailType": "CiEvent","EventBusName": "TestCiEventBus", "Source":"Builder", "Detail": . }]' > ci_event.json
+                    cat ci_event.json
+                    aws events put-events --entries file://ci_event.json
+                  fi
+          cache:
+            paths:
+              - '/root/.m2/**/*'
+              - '/root/.sonar/**/*'
+      TimeoutInMinutes: 10
+      Cache:
+        Type: LOCAL
+        Modes: # You can specify one or more cache mode,
+          - LOCAL_CUSTOM_CACHE
+          - LOCAL_DOCKER_LAYER_CACHE
+          - LOCAL_SOURCE_CACHE
+      Triggers:
+        Webhook: true
+        FilterGroups:
+          - - Type: EVENT
+              Pattern: PUSH, PULL_REQUEST_MERGED
+            - Type: HEAD_REF
+              Pattern: ^refs/heads/(main|develop)|release\/.*$
+          - - Type: EVENT
+              Pattern: PULL_REQUEST_CREATED, PULL_REQUEST_UPDATED, PULL_REQUEST_REOPENED
+            - Type: BASE_REF
+              Pattern: ^refs/heads/(main|develop)|release\/.*$
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ''
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: CodeBuildReportGroup
+                Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub 'arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/*'
+              - Sid: SendBuildEvents
+                Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource:
+                  - !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/TestCiEventBus'
+              - Sid: CloudWatchLogsPolicy
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+              - Sid: GitHubSecret
+                Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: "*"
+  
